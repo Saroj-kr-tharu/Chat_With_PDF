@@ -1,9 +1,10 @@
 from dotenv import load_dotenv
 from langchain_core.output_parsers import StrOutputParser
-from langchain_community.document_loaders import PyMuPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_community.chat_message_histories import SQLChatMessageHistory
+from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain.schema import Document
 import faiss
 from langchain_community.vectorstores import FAISS
@@ -13,6 +14,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmb
 import pymupdf
 import time
 import os
+import uuid
 
 
 class DocumentChat:
@@ -29,6 +31,8 @@ class DocumentChat:
         self.num_predict = int(os.getenv('Num_predict', 100))
         self.google_api_key = os.getenv('GOOGLE_API_KEY')
         self.db_name = 'health_supplements_VECTOR_DB'
+        self.db_history = 'sqlite:///chat_history.db'
+
         
         # Initialize embeddings
         self.embeddings = GoogleGenerativeAIEmbeddings(
@@ -36,6 +40,13 @@ class DocumentChat:
             google_api_key=self.google_api_key, 
             temperature=0.1
         )
+    
+    def getRandomUID():
+        myuuid = uuid.uuid4()
+        return myuuid
+
+    def get_session_history(self, sessionId):
+        return SQLChatMessageHistory(session_id=sessionId, connection=self.db_history)
 
     def is_greeting(self,query):
         """Check if the user input is a greeting"""
@@ -128,10 +139,10 @@ class DocumentChat:
             )
             
             prompt = ChatPromptTemplate.from_template(
-                """You are a helpful and informative bot that answers questions using text from the reference passage included below. \
-                Be sure to respond in a complete sentence, being comprehensive, including all relevant background information. \
-                However, you are talking to a non-technical audience, so be sure to break down complicated concepts and \
-                strike a friendly and conversational tone. \
+                """You are a helpful and informative bot that answers questions using text from the reference passage included below. 
+                Be sure to respond in a complete sentence, being comprehensive, including all relevant background information. 
+                However, you are talking to a non-technical audience, so be sure to break down complicated concepts and 
+                strike a friendly and conversational tone. 
                 If the passage is irrelevant to the answer, you may ignore it.
                 QUESTION: '{question}'
                 PASSAGE: '{context}'
@@ -148,12 +159,59 @@ class DocumentChat:
             )
             
             response = chain.invoke(question)
+            # print('response => ', response)
             return response
+            # finalresponse = self.ask_llmFormater(response)
+            # print('\n final response => ', finalresponse)
+            # return finalresponse
             
         except Exception as e:
             print(f"Error in ask_gemini: {e}")
             return f"Sorry, there was an error processing your question: {e}"
 
+    def ask_llmFormater(self, text):
+        """Return the text in format way  """
+        try:
+
+            llm = ChatGoogleGenerativeAI(
+                model="gemini-2.0-flash",
+                google_api_key=self.google_api_key,
+                temperature=0.0
+            )
+            
+            prompt = ChatPromptTemplate.from_template(
+                    """
+                    You are a text formatter that enhances readability while preserving 100% of the original content.
+
+                    FORMAT RULES:
+                    1. Convert main topics/section headings to **bold**
+                    2. Convert key terms, concepts, and subtopics to *italics*
+                    3. Use bullet points for lists and details
+                    4. Maintain all original information - do not summarize or remove anything
+                    5. Do not add any explanatory text, notes, or commentary
+                    6. Organize content with proper spacing and hierarchy
+                    7. Do not include phrases like "cannot be summarized" or explanations of format
+
+                    INPUT TEXT:
+                    '{context}'
+
+                    OUTPUT (formatted version of the exact same content):
+                    """
+                )
+            
+            # Create the chain
+            chain = (
+               prompt
+                | llm 
+                | StrOutputParser()
+            )
+            
+            response = chain.invoke(text)
+            return response
+            
+        except Exception as e:
+            print(f"Error in ask_llmFormater: {e}")
+            return f"Sorry, there was an error ask_llmFormater: {e}"
 
     def setup_GUI(self):
         """Setup the Streamlit GUI and return retriever if document is uploaded."""
@@ -228,6 +286,7 @@ class DocumentChat:
         """Main execution function."""
         try:
             # Initialize chat history in session state if it doesn't exist
+            
             if "chat_history" not in st.session_state:
                 st.session_state.chat_history = []
             
@@ -244,26 +303,31 @@ class DocumentChat:
             if prompt and retriever is not None:
                 # Add user message to chat history
                 st.session_state.chat_history.append({"role": "user", "content": prompt})
-                
+                 
                 with st.chat_message("user"):
                     st.markdown(prompt)
 
                 with st.chat_message('assistant'):
                     try:
-                        # Create a generator function for streaming
+                       # Create a generator function for streaming
                         def stream_response():
                             response = self.ask_gemini(question=prompt, retriever=retriever)
-                            # Split response into words for streaming effect
-                            words = response.split()
-                            for word in words:
-                                yield word + " "
-                                time.sleep(0.05)  
-                        
-                        # Stream the response
-                        full_response = st.write_stream(stream_response())
-                        
-                        # Add assistant response to chat history
-                        st.session_state.chat_history.append({"role": "assistant", "content": full_response})
+                            
+                            # Split response by lines to preserve formatting
+                            lines = response.split('\n')
+                            for line in lines:
+                                yield line + '\n'
+                                time.sleep(0.1)  # Slightly longer pause between lines
+
+                        # Collect the response for chat history
+                        response_content = self.ask_gemini(question=prompt, retriever=retriever)
+                            
+                        # Stream the response with markdown formatting (only once)
+                        st.write_stream(stream_response())
+
+                        # Add assistant response to chat history with the actual text content
+                        st.session_state.chat_history.append({"role": "assistant", "content": response_content})
+
                     except Exception as e:
                         error_msg = f"Sorry, there was an error processing your question: {e}"
                         st.error(error_msg)
