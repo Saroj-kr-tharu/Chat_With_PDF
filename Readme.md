@@ -1,12 +1,12 @@
 # Chat With Document - RAG Project
 
-A powerful Retrieval-Augmented Generation (RAG) application that allows users to upload PDF documents and have interactive conversations with their content using Google's Gemini model.
+A powerful Retrieval-Augmented Generation (RAG) application that allows users to upload PDF, DOCX, and CSV documents and have interactive conversations with their content using Google's Gemini model.
 
 ![Chat With Document Demo](/ScreenShot/image.png)
 
 ## 🚀 Features
 
-- Upload and process PDF documents
+- Upload and process PDF, DOCX, and CSV documents
 - Interactive chat interface via Streamlit
 - Smart document chunking and vector indexing
 - Context-aware responses using RAG architecture
@@ -65,9 +65,9 @@ A powerful Retrieval-Augmented Generation (RAG) application that allows users to
 
 ## 🔄 How It Works
 
-1. **Document Upload**: User uploads a PDF document
+1. **Document Upload**: User uploads a PDF, DOCX, or CSV document
 2. **Processing Pipeline**:
-    - PDF text extraction using PyMuPDF
+    - Document text extraction using appropriate libraries
     - Text chunking with RecursiveCharacterTextSplitter
     - Embedding generation with Google's text-embedding-004
     - Vector storage in FAISS
@@ -88,7 +88,7 @@ A powerful Retrieval-Augmented Generation (RAG) application that allows users to
 
 ## 📚 Future Improvements
 
-- Support for additional document types (DOCX, TXT, etc.)
+- Support for additional document types (HTML, JSON, etc.)
 - Multi-document conversations
 - User authentication and document history
 - Improved context handling for longer documents

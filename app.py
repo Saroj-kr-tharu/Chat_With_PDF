@@ -32,7 +32,7 @@ class DocumentChat:
         self.temperature = float(os.getenv('Temperature', 0.7))
         self.num_predict = int(os.getenv('Num_predict', 100))
         self.google_api_key = os.getenv('GOOGLE_API_KEY')
-        self.db_name = 'health_supplements_VECTOR_DB'
+        self.db_name = 'VECTOR_DB'
         self.db_history = 'sqlite:///chat_history.db'
 
         
