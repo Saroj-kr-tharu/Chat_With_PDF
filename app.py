@@ -15,7 +15,9 @@ import pymupdf
 import time
 import os
 import uuid
-
+from operator import itemgetter
+from langchain_community.chat_message_histories import ChatMessageHistory
+from langchain.schema.runnable import RunnableMap
 
 class DocumentChat:
     
@@ -40,22 +42,31 @@ class DocumentChat:
             google_api_key=self.google_api_key, 
             temperature=0.1
         )
+
+    def get_message_history(self, session_id):
+        """Retrieve message history for a session.
+        
+        Args:
+            session_id: User or session identifier
+            
+        Returns:
+            List of messages in the chat history
+        """
+        history = self.get_session_history(session_id)
+        return history.messages
+
+    def get_session_history(self, session_id):
+        """Get SQL-based chat history for a specific session."""
+        return SQLChatMessageHistory(session_id=session_id, connection=self.db_history)
     
-    def getRandomUID():
-        myuuid = uuid.uuid4()
-        return myuuid
+    def generate_session_id(self):
+        """Generate a random UUID for session identification."""
+        return str(uuid.uuid4())
 
-    def get_session_history(self, sessionId):
-        return SQLChatMessageHistory(session_id=sessionId, connection=self.db_history)
-
-    def is_greeting(self,query):
+    def is_greeting(self, query):
         """Check if the user input is a greeting"""
-       
         GREETING_PHRASES = ["hi", "hello", "hey", "greetings", "what's up", "howdy"]
         return query.lower().strip() in GREETING_PHRASES
-    
-       
-
 
     def format_docs(self, docs):
         """Format documents for context."""
@@ -124,13 +135,13 @@ class DocumentChat:
             print(f"Error in vectorStore_load: {e}")
             return None
 
-    def ask_gemini(self, question, retriever):
+
+    def ask_gemini(self, question, retriever, session_id):
         """Ask questions using the RAG system."""
         try:
             DEFAULT_GREETING = "I am the informative bot. How can I assist you?"
             if self.is_greeting(question):
                 return DEFAULT_GREETING
-    
 
             llm = ChatGoogleGenerativeAI(
                 model="gemini-2.0-flash",
@@ -150,82 +161,67 @@ class DocumentChat:
                 ANSWER:"""
             )
             
-            # Create the chain
+            # Define a proper function for RunnableMap to use
+            def get_context(inputs):
+                query = inputs["question"]
+                docs = retriever.get_relevant_documents(query)
+                return self.format_docs(docs)
+            
+            # Create the chain using a RunnableMap for proper connection
             chain = (
-                {"context": retriever | self.format_docs, "question": RunnablePassthrough()} 
+                RunnableMap({
+                    "context": lambda inputs: get_context(inputs),
+                    "question": itemgetter("question")
+                })
                 | prompt
                 | llm 
                 | StrOutputParser()
             )
             
-            response = chain.invoke(question)
-            # print('response => ', response)
+            # Define function that returns the ChatMessageHistory object
+            def get_message_history(session_id):
+                return ChatMessageHistory(
+                    key=f"chat_history_{session_id}"
+                )
+            
+            # Configure the chain with message history
+            chain_with_history = RunnableWithMessageHistory(
+                chain,
+                lambda session_id: get_message_history(session_id),
+                input_messages_key="question",
+                history_messages_key="history"
+            )
+            
+            # Get response with history
+            response = chain_with_history.invoke(
+                {"question": question},
+                config={"configurable": {"session_id": session_id}}
+            )
+            
             return response
-            # finalresponse = self.ask_llmFormater(response)
-            # print('\n final response => ', finalresponse)
-            # return finalresponse
             
         except Exception as e:
             print(f"Error in ask_gemini: {e}")
             return f"Sorry, there was an error processing your question: {e}"
-
-    def ask_llmFormater(self, text):
-        """Return the text in format way  """
-        try:
-
-            llm = ChatGoogleGenerativeAI(
-                model="gemini-2.0-flash",
-                google_api_key=self.google_api_key,
-                temperature=0.0
-            )
-            
-            prompt = ChatPromptTemplate.from_template(
-                    """
-                    You are a text formatter that enhances readability while preserving 100% of the original content.
-
-                    FORMAT RULES:
-                    1. Convert main topics/section headings to **bold**
-                    2. Convert key terms, concepts, and subtopics to *italics*
-                    3. Use bullet points for lists and details
-                    4. Maintain all original information - do not summarize or remove anything
-                    5. Do not add any explanatory text, notes, or commentary
-                    6. Organize content with proper spacing and hierarchy
-                    7. Do not include phrases like "cannot be summarized" or explanations of format
-
-                    INPUT TEXT:
-                    '{context}'
-
-                    OUTPUT (formatted version of the exact same content):
-                    """
-                )
-            
-            # Create the chain
-            chain = (
-               prompt
-                | llm 
-                | StrOutputParser()
-            )
-            
-            response = chain.invoke(text)
-            return response
-            
-        except Exception as e:
-            print(f"Error in ask_llmFormater: {e}")
-            return f"Sorry, there was an error ask_llmFormater: {e}"
+    
 
     def setup_GUI(self):
         """Setup the Streamlit GUI and return retriever if document is uploaded."""
         st.title('Chat With Your Document')
 
-        # Initialize session state for retriever
+        # Initialize session state for retriever and session_id
         if "retriever" not in st.session_state:
             st.session_state.retriever = None
+            
+        if "session_id" not in st.session_state:
+            st.session_state.session_id = self.generate_session_id()
+            st.sidebar.info(f"Session ID: {st.session_state.session_id}")
         
         # Return cached retriever if it exists
         if st.session_state.retriever is not None:
             return st.session_state.retriever
 
-        uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
+        uploaded_file = st.file_uploader("Choose a file", type=["pdf", "docx", "csv"])
         
         if uploaded_file is not None:
             # Check if we already processed this file
@@ -233,21 +229,22 @@ class DocumentChat:
                 return st.session_state.retriever
                 
             try:
-                # Step 1: Parse PDF
-                bytearray = uploaded_file.read()
-                pdf = pymupdf.open(stream=bytearray, filetype="pdf")
+                # Get file type from file name
+                file_type = uploaded_file.name.split('.')[-1].lower()
                 
-                docs = []
-                
-                # Extract text from PDF
-                for page in pdf:
-                    page_text = page.get_text()
-                    if page_text.strip():  # Only add non-empty pages
-                        docs.append(Document(page_content=page_text, metadata={"page": page.number}))
-                pdf.close()
+                # Process file based on type
+                if file_type == 'pdf':
+                    docs = self.process_pdf(uploaded_file)
+                elif file_type == 'docx':
+                    docs = self.process_docx(uploaded_file)
+                elif file_type == 'csv':
+                    docs = self.process_csv(uploaded_file)
+                else:
+                    st.error(f"Unsupported file type: {file_type}")
+                    return None
                 
                 if not docs:
-                    st.error("No text found in the PDF file.")
+                    st.error(f"No content found in the {file_type.upper()} file.")
                     return None
                 
                 # Step 2: Split the documents into chunks
@@ -273,7 +270,7 @@ class DocumentChat:
                 st.session_state.uploaded_file_name = uploaded_file.name
                     
                 st.success("Document processed successfully! You can now ask questions.")
-               
+            
                 return retriever
                 
             except Exception as e:
@@ -282,13 +279,70 @@ class DocumentChat:
         
         return None
 
+    def process_pdf(self, uploaded_file):
+        """Process PDF file and return documents."""
+        bytearray = uploaded_file.read()
+        pdf = pymupdf.open(stream=bytearray, filetype="pdf")
+        
+        docs = []
+        
+        # Extract text from PDF
+        for page in pdf:
+            page_text = page.get_text()
+            if page_text.strip():  # Only add non-empty pages
+                docs.append(Document(page_content=page_text, metadata={"page": page.number}))
+        pdf.close()
+        
+        return docs
+
+    def process_docx(self, uploaded_file):
+        """Process DOCX file and return documents."""
+        import docx
+        
+        # Read the content of the uploaded file
+        doc = docx.Document(uploaded_file)
+        
+        # Extract text from paragraphs
+        text = "\n".join([paragraph.text for paragraph in doc.paragraphs if paragraph.text.strip()])
+        
+        docs = []
+        if text.strip():
+            docs.append(Document(page_content=text, metadata={"source": uploaded_file.name}))
+        
+        return docs
+
+    def process_csv(self, uploaded_file):
+        """Process CSV file and return documents."""
+        import pandas as pd
+        import io
+        
+        # Read CSV file
+        df = pd.read_csv(io.BytesIO(uploaded_file.getvalue()))
+        
+        docs = []
+        
+        # Convert each row to a document
+        for index, row in df.iterrows():
+            # Convert row to string
+            content = "\n".join([f"{col}: {val}" for col, val in row.items()])
+            if content.strip():
+                docs.append(Document(page_content=content, metadata={"row": index, "source": uploaded_file.name}))
+        
+        return docs
+
     def run(self):
         """Main execution function."""
         try:
             # Initialize chat history in session state if it doesn't exist
-            
             if "chat_history" not in st.session_state:
                 st.session_state.chat_history = []
+            
+            # Get or create session ID
+            if "session_id" not in st.session_state:
+                st.session_state.session_id = self.generate_session_id()
+            
+            # Show session ID in sidebar (for debugging, can be removed in production)
+            # st.sidebar.info(f"Session ID: {st.session_state.session_id}")
             
             retriever = self.setup_GUI()
             
@@ -303,15 +357,23 @@ class DocumentChat:
             if prompt and retriever is not None:
                 # Add user message to chat history
                 st.session_state.chat_history.append({"role": "user", "content": prompt})
+                
+                # Add to SQL chat history
+                chat_history = self.get_session_history(st.session_state.session_id)
+                chat_history.add_user_message(prompt)
                  
                 with st.chat_message("user"):
                     st.markdown(prompt)
 
                 with st.chat_message('assistant'):
                     try:
-                       # Create a generator function for streaming
+                        # Create a generator function for streaming
                         def stream_response():
-                            response = self.ask_gemini(question=prompt, retriever=retriever)
+                            response = self.ask_gemini(
+                                question=prompt, 
+                                retriever=retriever, 
+                                session_id=st.session_state.session_id
+                            )
                             
                             # Split response by lines to preserve formatting
                             lines = response.split('\n')
@@ -319,14 +381,21 @@ class DocumentChat:
                                 yield line + '\n'
                                 time.sleep(0.1)  # Slightly longer pause between lines
 
-                        # Collect the response for chat history
-                        response_content = self.ask_gemini(question=prompt, retriever=retriever)
+                        # Get the full response
+                        response_content = self.ask_gemini(
+                            question=prompt, 
+                            retriever=retriever, 
+                            session_id=st.session_state.session_id
+                        )
                             
-                        # Stream the response with markdown formatting (only once)
+                        # Stream the response with markdown formatting
                         st.write_stream(stream_response())
 
-                        # Add assistant response to chat history with the actual text content
+                        # Add assistant response to chat history
                         st.session_state.chat_history.append({"role": "assistant", "content": response_content})
+                        
+                        # Add to SQL chat history
+                        chat_history.add_ai_message(response_content)
 
                     except Exception as e:
                         error_msg = f"Sorry, there was an error processing your question: {e}"
